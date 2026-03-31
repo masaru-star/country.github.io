@@ -1,0 +1,744 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>文明興亡シミュレーション</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        /* フォントやスクロールバーの微調整 */
+        @import url('https://fonts.googleapis.com/css2?family=Noto+Sans+JP:wght@400;700&display=swap');
+        body { font-family: 'Noto Sans JP', sans-serif; }
+        ::-webkit-scrollbar { width: 6px; }
+        ::-webkit-scrollbar-track { background: #1e293b; }
+        ::-webkit-scrollbar-thumb { background: #475569; border-radius: 3px; }
+        ::-webkit-scrollbar-thumb:hover { background: #64748b; }
+    </style>
+</head>
+<body class="bg-slate-900 text-slate-200 h-screen w-full flex overflow-hidden selection:bg-amber-500 selection:text-white">
+
+    <!-- サイドパネル（情報UI） -->
+    <div class="w-80 flex flex-col border-r border-slate-700 bg-slate-800 shadow-xl z-10 flex-shrink-0">
+        <!-- ヘッダー -->
+        <div class="p-4 border-b border-slate-700 bg-slate-900 flex justify-between items-center">
+            <h1 class="text-xl font-bold text-amber-500 tracking-wider">文明の軌跡</h1>
+            <button id="btnToggle" class="bg-amber-600 hover:bg-amber-500 text-white px-4 py-1.5 rounded text-sm font-bold shadow cursor-pointer transition duration-200">
+                停止
+            </button>
+        </div>
+        
+        <!-- グローバルステータス -->
+        <div class="p-5 border-b border-slate-700 flex flex-col gap-2 bg-slate-800/50">
+            <div class="text-3xl font-mono text-center mb-2 font-bold text-slate-100" id="uiYear">西暦 1 年</div>
+            <div class="flex justify-between text-sm items-center">
+                <span class="text-slate-400">世界総人口:</span> 
+                <span id="uiTotalPop" class="font-mono text-lg text-emerald-400">0</span>
+            </div>
+            <div class="flex justify-between text-sm items-center">
+                <span class="text-slate-400">現存する国家数:</span> 
+                <span id="uiCivCount" class="font-mono text-lg text-blue-400">0</span>
+            </div>
+        </div>
+
+        <!-- 選択セルの詳細情報 -->
+        <div class="p-4 border-b border-slate-700 h-48 bg-slate-900/50" id="uiSelection">
+            <div class="text-slate-500 text-sm text-center mt-12 flex flex-col items-center gap-2">
+                <svg class="w-6 h-6 animate-bounce" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 15l-2 5L9 9l11 4-5 2zm0 0l5 5M7.188 2.239l.777 2.897M5.136 7.965l-2.898-.777M13.95 4.05l-2.122 2.122m-5.657 5.656l-2.12 2.122"></path></svg>
+                マップをホバーすると<br>詳細情報が表示されます
+            </div>
+        </div>
+
+        <!-- タブ切替 -->
+        <div class="flex text-sm font-bold border-b border-slate-700 bg-slate-900">
+            <button class="flex-1 py-3 bg-slate-700 text-white transition" id="tabRanking">国家勢力図</button>
+            <button class="flex-1 py-3 text-slate-400 hover:text-white transition" id="tabLog">歴史年表</button>
+        </div>
+
+        <!-- パネルコンテンツ -->
+        <div class="flex-1 overflow-y-auto p-3 bg-slate-800" id="panelContent">
+            <div id="rankingList" class="flex flex-col gap-2"></div>
+            <div id="logList" class="hidden flex-col gap-2 text-sm text-slate-300"></div>
+        </div>
+    </div>
+
+    <!-- メインマップエリア -->
+    <div class="flex-1 relative bg-black" id="mapContainer">
+        <!-- ピクセルデータ操作用のオフスクリーンキャンバス -->
+        <canvas id="bgCanvas" style="display:none;"></canvas>
+        <!-- ユーザーに見せるメインキャンバス -->
+        <canvas id="uiCanvas" class="absolute inset-0 cursor-crosshair w-full h-full"></canvas>
+    </div>
+
+    <script>
+        // --- 設定・定数 ---
+        const MAP_WIDTH = 220;  // 論理マップ幅
+        const MAP_HEIGHT = 160; // 論理マップ高さ
+        const MAX_CIVS = 30;    // 最大国家数
+        
+        // --- グローバル状態 ---
+        let map = [];
+        let civs = [];
+        let civIdCounter = 1;
+        let cityIdCounter = 1;
+        let logs = [];
+        
+        let year = 1;
+        let isPaused = false;
+        
+        // 描画関連
+        let bgCanvas, bgCtx, bgImgData;
+        let uiCanvas, uiCtx;
+        let drawScale = 1;
+        let drawOffsetX = 0, drawOffsetY = 0;
+        let hoverX = -1, hoverY = -1;
+
+        // --- クラス定義 ---
+        class Civilization {
+            constructor(id, color, name) {
+                this.id = id;
+                this.color = color; // {r, g, b}
+                this.name = name;
+                this.territory = new Set(); // "x,y"の文字列セット。O(1)で検索・削除可能
+                this.frontiers = new Set(); // 拡張の最前線となるセル
+                this.cities = [];
+                this.population = 500;
+                this.tech = 1.0;
+                this.military = 1.0;
+                this.expansionPoints = 0;
+                this.isAlive = true;
+            }
+        }
+
+        // --- ユーティリティ ---
+        // ランダムな名前生成（音節の組み合わせ）
+        const syllables = ["バ", "ロ", "マ", "カ", "テ", "シ", "ノ", "ル", "ヴィ", "ダ", "ゼン", "ガル", "トル", "ニム", "スル", "ペ", "コ", "ザル", "アル", "イラ"];
+        function generateCivName() {
+            let len = Math.floor(Math.random() * 2) + 2;
+            let name = "";
+            for(let i=0; i<len; i++) name += syllables[Math.floor(Math.random() * syllables.length)];
+            return name + (Math.random() > 0.6 ? "帝国" : Math.random() > 0.5 ? "王国" : "公国");
+        }
+
+        const citySuffixes = ["ポリス", "グラード", "ブルク", "ヴィル", "京", "城", "の都"];
+        const cityPrefixes = ["アル・", "サン・", "ニュー", "大", "古"];
+        function generateCityName() {
+            let base = generateCivName().replace(/帝国|王国|公国/g, "");
+            let r = Math.random();
+            if (r < 0.3) return cityPrefixes[Math.floor(Math.random() * cityPrefixes.length)] + base;
+            if (r < 0.6) return base + citySuffixes[Math.floor(Math.random() * citySuffixes.length)];
+            return base;
+        }
+
+        // 視認性の高いランダム色生成
+        function generateColor() {
+            let hue = Math.floor(Math.random() * 360);
+            let sat = 60 + Math.random() * 40; // 60-100%
+            let lig = 40 + Math.random() * 20; // 40-60%
+            
+            let c = (1 - Math.abs(2 * lig / 100 - 1)) * (sat / 100);
+            let x = c * (1 - Math.abs((hue / 60) % 2 - 1));
+            let m = lig / 100 - c / 2;
+            let r=0, g=0, b=0;
+            
+            if(hue<60){r=c;g=x;b=0}else if(hue<120){r=x;g=c;b=0}else if(hue<180){r=0;g=c;b=x}
+            else if(hue<240){r=0;g=x;b=c}else if(hue<300){r=x;g=0;b=c}else{r=c;g=0;b=x}
+            return { r: Math.round((r+m)*255), g: Math.round((g+m)*255), b: Math.round((b+m)*255) };
+        }
+
+        function logEvent(msg) {
+            logs.push(`[西暦 ${Math.floor(year)}年] ${msg}`);
+            if (logs.length > 60) logs.shift();
+        }
+
+        // --- シミュレーションコアロジック ---
+
+        function initMap() {
+            map = [];
+            for (let x = 0; x < MAP_WIDTH; x++) {
+                let col = [];
+                for (let y = 0; y < MAP_HEIGHT; y++) {
+                    // type: 0=海, 1=平野, 2=山岳
+                    col.push({ type: 0, civId: null, cityId: null });
+                }
+                map.push(col);
+            }
+
+            // 1. 大陸の種をまく
+            let numIslands = 25;
+            for (let i = 0; i < numIslands; i++) {
+                let cx = Math.floor(Math.random() * MAP_WIDTH);
+                let cy = Math.floor(Math.random() * MAP_HEIGHT);
+                let radius = 10 + Math.random() * 20;
+                
+                for (let x = 0; x < MAP_WIDTH; x++) {
+                    for (let y = 0; y < MAP_HEIGHT; y++) {
+                        let dist = Math.sqrt((x - cx) ** 2 + (y - cy) ** 2);
+                        // パーリンノイズの代わりの簡易ノイズで海岸線を複雑に
+                        let noise = Math.sin(x * 0.3) * 3 + Math.cos(y * 0.3) * 3 + (Math.random() * 4 - 2);
+                        if (dist + noise < radius) {
+                            map[x][y].type = 1;
+                        }
+                    }
+                }
+            }
+
+            // 2. セルオートマトンで地形を滑らかに（孤島を消す等）
+            for (let step = 0; step < 3; step++) {
+                let newMap = map.map(col => col.map(cell => ({...cell})));
+                for (let x = 1; x < MAP_WIDTH - 1; x++) {
+                    for (let y = 1; y < MAP_HEIGHT - 1; y++) {
+                        let landNeighbors = 0;
+                        for(let dx=-1; dx<=1; dx++) {
+                            for(let dy=-1; dy<=1; dy++) {
+                                if(dx===0 && dy===0) continue;
+                                if(map[x+dx][y+dy].type !== 0) landNeighbors++;
+                            }
+                        }
+                        if (map[x][y].type === 1 && landNeighbors < 3) newMap[x][y].type = 0;
+                        else if (map[x][y].type === 0 && landNeighbors > 4) newMap[x][y].type = 1;
+                    }
+                }
+                map = newMap;
+            }
+
+            // 3. 山脈の生成（内陸部にできやすい）
+            for (let x = 1; x < MAP_WIDTH - 1; x++) {
+                for (let y = 1; y < MAP_HEIGHT - 1; y++) {
+                    if (map[x][y].type === 1) {
+                        let isInner = true;
+                        // 周囲2マス以内に海がないかチェック
+                        for(let dx=-2; dx<=2; dx++) {
+                            for(let dy=-2; dy<=2; dy++) {
+                                if(x+dx>=0 && x+dx<MAP_WIDTH && y+dy>=0 && y+dy<MAP_HEIGHT) {
+                                    if(map[x+dx][y+dy].type === 0) isInner = false;
+                                }
+                            }
+                        }
+                        if (isInner && Math.random() < 0.2) {
+                            map[x][y].type = 2; // 山岳
+                        }
+                    }
+                }
+            }
+        }
+
+        // セルを獲得する
+        function claimCell(x, y, civ) {
+            let key = `${x},${y}`;
+            map[x][y].civId = civ.id;
+            civ.territory.add(key);
+            civ.frontiers.add(key);
+        }
+
+        // セルを奪う
+        function transferCell(x, y, fromCiv, toCiv) {
+            let key = `${x},${y}`;
+            fromCiv.territory.delete(key);
+            fromCiv.frontiers.delete(key);
+            
+            // 都市の占領判定
+            if (map[x][y].cityId !== null) {
+                let cityIdx = fromCiv.cities.findIndex(c => c.id === map[x][y].cityId);
+                if (cityIdx >= 0) {
+                    let city = fromCiv.cities.splice(cityIdx, 1)[0];
+                    toCiv.cities.push(city);
+                    logEvent(`⚔️ 【陥落】${fromCiv.name}の都市「${city.name}」が${toCiv.name}に占領された！`);
+                }
+            }
+
+            map[x][y].civId = toCiv.id;
+            toCiv.territory.add(key);
+            toCiv.frontiers.add(key);
+        }
+
+        // 新国家誕生
+        function spawnCiv(originCiv = null) {
+            let x, y;
+            if (originCiv) {
+                // 反乱・分裂時: 元の国家の領土からランダムに選ぶ
+                let arr = Array.from(originCiv.territory);
+                if(arr.length === 0) return null;
+                let key = arr[Math.floor(Math.random() * arr.length)];
+                [x, y] = key.split(',').map(Number);
+            } else {
+                // 自然発生: 未開の平野を探す
+                let attempts = 100;
+                while(attempts-- > 0) {
+                    let tx = Math.floor(Math.random() * MAP_WIDTH);
+                    let ty = Math.floor(Math.random() * MAP_HEIGHT);
+                    if (map[tx][ty].type === 1 && map[tx][ty].civId === null) {
+                        x = tx; y = ty; break;
+                    }
+                }
+            }
+
+            if (x === undefined) return null;
+
+            let civ = new Civilization(civIdCounter++, generateColor(), generateCivName());
+            civs.push(civ);
+
+            if (originCiv) {
+                // 反乱軍は一時的に強力な軍事力を持つ
+                civ.military = originCiv.military * 0.8;
+                civ.tech = originCiv.tech;
+                transferCell(x, y, originCiv, civ);
+            } else {
+                claimCell(x, y, civ);
+            }
+            
+            // 首都建設
+            if (map[x][y].cityId === null) {
+                let city = { id: cityIdCounter++, name: generateCityName(), x: x, y: y, founded: Math.floor(year) };
+                civ.cities.push(city);
+                map[x][y].cityId = city.id;
+                
+                if(!originCiv) {
+                    logEvent(`🌱 【建国】未開の地に${civ.name}が誕生し、「${city.name}」を都とした。`);
+                }
+            }
+
+            return civ;
+        }
+
+        // 大帝国の分裂・反乱
+        function collapseCiv(civ) {
+            if (civ.cities.length <= 1) return; 
+            
+            let rebelCityIndex = Math.floor(Math.random() * civ.cities.length);
+            if(rebelCityIndex === 0) rebelCityIndex = 1; // 首都以外で反乱が起きやすい
+            let rebelCity = civ.cities[rebelCityIndex];
+            
+            let rebelCiv = new Civilization(civIdCounter++, generateColor(), generateCivName());
+            rebelCiv.tech = civ.tech;
+            civs.push(rebelCiv);
+            
+            logEvent(`🔥 【反乱発生】巨大化した${civ.name}で内戦が勃発！都市「${rebelCity.name}」が${rebelCiv.name}として独立を宣言した！`);
+            
+            // 反乱都市の周辺セル（チェビシェフ距離）を寝返らせる
+            let radius = Math.floor(Math.sqrt(civ.territory.size) * 0.3); 
+            let toTransfer = [];
+            civ.territory.forEach(key => {
+                let [cx, cy] = key.split(',').map(Number);
+                if (Math.max(Math.abs(cx - rebelCity.x), Math.abs(cy - rebelCity.y)) <= radius) {
+                    toTransfer.push({x: cx, y: cy});
+                }
+            });
+
+            toTransfer.forEach(cell => {
+                transferCell(cell.x, cell.y, civ, rebelCiv);
+            });
+        }
+
+        // 領土拡張ロジック
+        function expandCiv(civ) {
+            if (civ.frontiers.size === 0) {
+                // フロンティア枯渇時、領土全体から再スキャン（フェイルセーフ）
+                let arr = Array.from(civ.territory);
+                if(arr.length === 0) return;
+                civ.frontiers.add(arr[Math.floor(Math.random() * arr.length)]);
+            }
+
+            let points = Math.floor(civ.expansionPoints);
+            if (points <= 0) {
+                if (Math.random() < civ.expansionPoints) points = 1;
+                else return;
+            }
+
+            let frontiersArr = Array.from(civ.frontiers);
+            const dirs = [[0,-1], [0,1], [-1,0], [1,0]];
+
+            for(let i=0; i<points; i++) {
+                if(frontiersArr.length === 0) break;
+                
+                let idx = Math.floor(Math.random() * frontiersArr.length);
+                let key = frontiersArr[idx];
+                let [sx, sy] = key.split(',').map(Number);
+                
+                let dir = dirs[Math.floor(Math.random()*4)];
+                let nx = sx + dir[0];
+                let ny = sy + dir[1];
+                
+                if (nx >= 0 && nx < MAP_WIDTH && ny >= 0 && ny < MAP_HEIGHT) {
+                    let target = map[nx][ny];
+                    if (target.type !== 0 && target.civId !== civ.id) {
+                        
+                        // 地形による拡張コスト
+                        let successRate = target.type === 2 ? 0.25 : 0.85; // 山は進軍しにくい
+                        
+                        if (Math.random() <= successRate) {
+                            if (target.civId === null) {
+                                // 空き地開拓
+                                claimCell(nx, ny, civ);
+                                civ.expansionPoints -= 1;
+                            } else {
+                                // 戦争
+                                let enemy = civs.find(c => c.id === target.civId);
+                                if (enemy) {
+                                    // 乱数を含めた戦闘力計算
+                                    let myAtk = civ.military * (0.6 + Math.random() * 0.8);
+                                    let defDef = enemy.military * (0.6 + Math.random() * 0.8) * 1.3; // 防衛有利
+                                    if (target.type === 2) defDef *= 1.8; // 山岳防衛ボーナス
+
+                                    if (myAtk > defDef) {
+                                        transferCell(nx, ny, enemy, civ);
+                                        civ.expansionPoints -= 1.5; // 戦争はコスト高
+                                    } else {
+                                        civ.expansionPoints -= 0.5; // 敗北でもポイント消費
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // セルが周囲を自国・海で囲まれたらフロンティアから除外
+                let surrounded = true;
+                for(let d of dirs) {
+                    let cx = sx + d[0], cy = sy + d[1];
+                    if (cx >= 0 && cx < MAP_WIDTH && cy >= 0 && cy < MAP_HEIGHT) {
+                        let ct = map[cx][cy];
+                        if (ct.type !== 0 && ct.civId !== civ.id) {
+                            surrounded = false; break;
+                        }
+                    }
+                }
+                if (surrounded) {
+                    civ.frontiers.delete(key);
+                    frontiersArr.splice(idx, 1);
+                }
+            }
+        }
+
+        function buildCity(civ) {
+            let arr = Array.from(civ.territory);
+            // 試行回数を制限
+            for(let i=0; i<10; i++) {
+                let key = arr[Math.floor(Math.random() * arr.length)];
+                let [x, y] = key.split(',').map(Number);
+                // 平野で、かつ既存の都市がない場所
+                if (map[x][y].type === 1 && map[x][y].cityId === null) {
+                    let city = { id: cityIdCounter++, name: generateCityName(), x: x, y: y, founded: Math.floor(year) };
+                    civ.cities.push(city);
+                    map[x][y].cityId = city.id;
+                    logEvent(`🏙️ ${civ.name}が新たな都市「${city.name}」を建設した。`);
+                    break;
+                }
+            }
+        }
+
+        // --- 描画・UIロジック ---
+
+        function setupCanvas() {
+            bgCanvas = document.getElementById('bgCanvas');
+            bgCanvas.width = MAP_WIDTH;
+            bgCanvas.height = MAP_HEIGHT;
+            bgCtx = bgCanvas.getContext('2d', { willReadFrequently: true });
+            bgImgData = bgCtx.createImageData(MAP_WIDTH, MAP_HEIGHT);
+
+            uiCanvas = document.getElementById('uiCanvas');
+            uiCtx = uiCanvas.getContext('2d');
+            
+            window.addEventListener('resize', resizeCanvas);
+            resizeCanvas();
+
+            // マウス操作
+            uiCanvas.addEventListener('mousemove', (e) => {
+                let rect = uiCanvas.getBoundingClientRect();
+                let cx = e.clientX - rect.left;
+                let cy = e.clientY - rect.top;
+                hoverX = Math.floor((cx - drawOffsetX) / drawScale);
+                hoverY = Math.floor((cy - drawOffsetY) / drawScale);
+                updateUISelection(); // 即時反映
+            });
+            uiCanvas.addEventListener('mouseleave', () => {
+                hoverX = -1; hoverY = -1;
+                updateUISelection();
+            });
+        }
+
+        function resizeCanvas() {
+            let container = document.getElementById('mapContainer');
+            uiCanvas.width = container.clientWidth;
+            uiCanvas.height = container.clientHeight;
+            
+            // 画面に合わせてアスペクト比を維持しつつ最大化（少し余白を取る）
+            drawScale = Math.min(uiCanvas.width / MAP_WIDTH, uiCanvas.height / MAP_HEIGHT) * 0.98; 
+            drawOffsetX = (uiCanvas.width - MAP_WIDTH * drawScale) / 2;
+            drawOffsetY = (uiCanvas.height - MAP_HEIGHT * drawScale) / 2;
+        }
+
+        function renderMap() {
+            // 1. ピクセルデータとして地形と領土を生成
+            for (let x = 0; x < MAP_WIDTH; x++) {
+                for (let y = 0; y < MAP_HEIGHT; y++) {
+                    let idx = (y * MAP_WIDTH + x) * 4;
+                    let cell = map[x][y];
+                    let r, g, b;
+
+                    if (cell.type === 0) {
+                        // 海：波を表現するノイズ
+                        let wave = (Math.sin(x*0.2 + year*0.5) + Math.cos(y*0.2 + year*0.5)) * 4;
+                        r = 15; g = 30 + wave; b = 60 + wave;
+                    } else if (cell.type === 1) {
+                        r = 60; g = 130; b = 70; // 平野
+                    } else if (cell.type === 2) {
+                        r = 110; g = 100; b = 90; // 山岳
+                    }
+
+                    // 領土カラーの合成
+                    if (cell.civId !== null) {
+                        let civ = civs.find(c => c.id === cell.civId);
+                        if (civ) {
+                            let alpha = 0.6; // 透明度
+                            r = r * (1 - alpha) + civ.color.r * alpha;
+                            g = g * (1 - alpha) + civ.color.g * alpha;
+                            b = b * (1 - alpha) + civ.color.b * alpha;
+                        }
+                    }
+
+                    // 国境線を描画（簡易的に右か下が違う領土なら暗くする）
+                    if (cell.type !== 0 && cell.civId !== null) {
+                        let isBorder = false;
+                        if (x < MAP_WIDTH-1 && map[x+1][y].civId !== cell.civId) isBorder = true;
+                        if (y < MAP_HEIGHT-1 && map[x][y+1].civId !== cell.civId) isBorder = true;
+                        if (isBorder) {
+                            r *= 0.4; g *= 0.4; b *= 0.4;
+                        }
+                    }
+
+                    bgImgData.data[idx] = r;
+                    bgImgData.data[idx+1] = g;
+                    bgImgData.data[idx+2] = b;
+                    bgImgData.data[idx+3] = 255;
+                }
+            }
+            bgCtx.putImageData(bgImgData, 0, 0);
+
+            // 2. メインキャンバスに拡大描画
+            uiCtx.clearRect(0, 0, uiCanvas.width, uiCanvas.height);
+            uiCtx.imageSmoothingEnabled = false; // ドット絵風のくっきりした描画
+            uiCtx.drawImage(bgCanvas, drawOffsetX, drawOffsetY, MAP_WIDTH * drawScale, MAP_HEIGHT * drawScale);
+
+            // 3. 都市マーカーの描画
+            civs.forEach(civ => {
+                if (!civ.isAlive) return;
+                civ.cities.forEach((city, i) => {
+                    let cx = drawOffsetX + city.x * drawScale + drawScale/2;
+                    let cy = drawOffsetY + city.y * drawScale + drawScale/2;
+                    let isCapital = (i === 0);
+                    
+                    uiCtx.fillStyle = 'rgba(255, 255, 255, 0.9)';
+                    uiCtx.beginPath();
+                    uiCtx.arc(cx, cy, isCapital ? drawScale*1.2 : drawScale*0.6, 0, Math.PI*2);
+                    uiCtx.fill();
+                    
+                    if (isCapital) {
+                        uiCtx.strokeStyle = 'rgba(0, 0, 0, 0.8)';
+                        uiCtx.lineWidth = 1;
+                        uiCtx.stroke();
+                    }
+                });
+            });
+
+            // 4. マウスホバー時のハイライト
+            if (hoverX >= 0 && hoverX < MAP_WIDTH && hoverY >= 0 && hoverY < MAP_HEIGHT) {
+                let cx = drawOffsetX + hoverX * drawScale;
+                let cy = drawOffsetY + hoverY * drawScale;
+                uiCtx.strokeStyle = 'rgba(255, 215, 0, 0.8)'; // ゴールド
+                uiCtx.lineWidth = 2;
+                uiCtx.strokeRect(cx, cy, drawScale, drawScale);
+            }
+        }
+
+        function updateUI() {
+            document.getElementById('uiYear').textContent = `西暦 ${Math.floor(year)} 年`;
+            
+            let totalPop = civs.reduce((sum, civ) => sum + (civ.isAlive ? civ.population : 0), 0);
+            document.getElementById('uiTotalPop').textContent = Math.floor(totalPop).toLocaleString();
+            
+            let aliveCivs = civs.filter(c => c.isAlive);
+            document.getElementById('uiCivCount').textContent = aliveCivs.length;
+
+            // ランキングUI
+            aliveCivs.sort((a, b) => b.territory.size - a.territory.size);
+            let rankingHtml = '';
+            aliveCivs.forEach(civ => {
+                rankingHtml += `
+                    <div class="flex items-center gap-3 bg-slate-900/80 p-2.5 rounded border border-slate-700 hover:border-slate-500 transition">
+                        <div class="w-4 h-4 rounded-full shadow-sm" style="background-color: rgb(${civ.color.r},${civ.color.g},${civ.color.b})"></div>
+                        <div class="flex-1 font-bold truncate">${civ.name}</div>
+                        <div class="flex flex-col items-end">
+                            <div class="text-xs text-slate-400">領土</div>
+                            <div class="text-sm font-mono text-emerald-300">${civ.territory.size}</div>
+                        </div>
+                    </div>
+                `;
+            });
+            document.getElementById('rankingList').innerHTML = rankingHtml;
+
+            // ログUI
+            let logHtml = '';
+            [...logs].reverse().forEach(log => {
+                let isMajor = log.includes('建国') || log.includes('滅亡') || log.includes('反乱');
+                let colorClass = isMajor ? 'text-amber-300 font-bold' : 'text-slate-300';
+                logHtml += `<div class="border-l-2 ${isMajor ? 'border-amber-500' : 'border-slate-600'} pl-3 py-1.5 ${colorClass}">${log}</div>`;
+            });
+            document.getElementById('logList').innerHTML = logHtml;
+
+            updateUISelection();
+        }
+
+        function updateUISelection() {
+            let selectionDiv = document.getElementById('uiSelection');
+            if (hoverX >= 0 && hoverX < MAP_WIDTH && hoverY >= 0 && hoverY < MAP_HEIGHT) {
+                let cell = map[hoverX][hoverY];
+                let typeStr = cell.type === 0 ? '🌊 海' : cell.type === 1 ? '🌿 平野' : '⛰️ 山岳';
+                
+                let content = `<div class="font-bold text-sm mb-2 text-slate-400">地形: ${typeStr}</div>`;
+                
+                if (cell.civId !== null) {
+                    let civ = civs.find(c => c.id === cell.civId);
+                    if (civ) {
+                        content += `
+                            <div class="flex items-center gap-2 mb-3">
+                                <div class="w-3.5 h-3.5 rounded-full shadow" style="background-color: rgb(${civ.color.r},${civ.color.g},${civ.color.b})"></div>
+                                <div class="font-bold text-lg tracking-wide" style="color: rgb(${civ.color.r},${civ.color.g},${civ.color.b})">${civ.name}</div>
+                            </div>
+                            <div class="grid grid-cols-2 gap-x-2 gap-y-1 text-sm bg-slate-800/80 p-2 rounded">
+                                <div class="text-slate-400">人口: <span class="text-slate-200 font-mono">${Math.floor(civ.population).toLocaleString()}</span></div>
+                                <div class="text-slate-400">領土: <span class="text-slate-200 font-mono">${civ.territory.size}</span></div>
+                                <div class="text-slate-400">技術力: <span class="text-slate-200 font-mono">${civ.tech.toFixed(2)}</span></div>
+                                <div class="text-slate-400">軍事力: <span class="text-slate-200 font-mono">${Math.floor(civ.military).toLocaleString()}</span></div>
+                            </div>
+                        `;
+                    }
+                    if (cell.cityId !== null && civ) {
+                        let city = civ.cities.find(c => c.id === cell.cityId);
+                        if (city) {
+                            let isCapital = (city === civ.cities[0]);
+                            content += `
+                                <div class="mt-2 p-2 bg-indigo-900/40 rounded border border-indigo-500/30 flex justify-between items-center">
+                                    <div class="text-indigo-200 font-bold text-sm">${isCapital ? '👑 首都' : '🏙️ 都市'} ${city.name}</div>
+                                    <div class="text-xs text-indigo-300/70">建都: ${city.founded}年</div>
+                                </div>
+                            `;
+                        }
+                    }
+                } else {
+                    content += `<div class="text-slate-500 text-sm italic mt-4">未開の地。いまだ国家の支配は及んでいない。</div>`;
+                }
+                selectionDiv.innerHTML = content;
+            } else {
+                selectionDiv.innerHTML = `
+                    <div class="text-slate-500 text-sm text-center mt-12 flex flex-col items-center gap-2">
+                        <svg class="w-6 h-6 animate-pulse" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 15l-2 5L9 9l11 4-5 2zm0 0l5 5M7.188 2.239l.777 2.897M5.136 7.965l-2.898-.777M13.95 4.05l-2.122 2.122m-5.657 5.656l-2.12 2.122"></path></svg>
+                        マップをホバーすると<br>詳細情報が表示されます
+                    </div>`;
+            }
+        }
+
+        // --- メインループ ---
+
+        function updateSim() {
+            year += 0.2; // 1フレームで進む年数
+
+            // 自然発生
+            if (Math.random() < 0.04 && civs.filter(c=>c.isAlive).length < MAX_CIVS) {
+                spawnCiv();
+            }
+
+            civs.forEach(civ => {
+                if (!civ.isAlive) return;
+                
+                // 人口推移 (領土と都市数に依存する環境収容力)
+                let capacity = civ.territory.size * 600 + civ.cities.length * 4000;
+                civ.population += (capacity - civ.population) * 0.01;
+                if(civ.population < 100) civ.population = 100;
+
+                // 技術・軍事力の成長
+                civ.tech += 0.0004 * Math.log10(civ.population + 10);
+                civ.military = civ.population * civ.tech * 0.1;
+
+                // 拡張力の算出 (大きすぎる帝国は辺境への統治力が低下し拡張が鈍る)
+                let expansionRate = Math.sqrt(civ.population) / 40;
+                let empirePenalty = Math.max(0.05, 1 - (civ.territory.size / (MAP_WIDTH*MAP_HEIGHT*0.15))); 
+                civ.expansionPoints += expansionRate * empirePenalty;
+
+                expandCiv(civ);
+
+                // 都市建設 (領土が一定以上広がったら)
+                if (civ.territory.size > civ.cities.length * 60) {
+                    buildCity(civ);
+                }
+
+                // 巨大帝国の反乱判定
+                if (civ.territory.size > 250 && civ.cities.length > 1) {
+                    // サイズが大きいほど確率が上がる
+                    let collapseProb = 0.0001 + (civ.territory.size - 250) * 0.000008;
+                    if (Math.random() < collapseProb) {
+                        collapseCiv(civ);
+                    }
+                }
+            });
+
+            // 滅亡判定
+            civs.forEach(civ => {
+                if (civ.isAlive && civ.territory.size === 0) {
+                    civ.isAlive = false;
+                    logEvent(`☠️ 【滅亡】${civ.name}はすべての領土を失い、歴史から姿を消した。`);
+                }
+            });
+        }
+
+        let lastTime = 0;
+        function loop(timestamp) {
+            if (!isPaused) {
+                updateSim();
+            }
+            renderMap();
+            // UIの更新は負荷を下げるためフレームごとに行うが、タイマーで間引いても良い
+            updateUI(); 
+            
+            requestAnimationFrame(loop);
+        }
+
+        // --- 初期化処理 ---
+        function init() {
+            initMap();
+            setupCanvas();
+            
+            // UIイベント
+            document.getElementById('btnToggle').addEventListener('click', (e) => {
+                isPaused = !isPaused;
+                e.target.textContent = isPaused ? "再開" : "停止";
+                e.target.className = isPaused 
+                    ? "bg-emerald-600 hover:bg-emerald-500 text-white px-4 py-1.5 rounded text-sm font-bold shadow cursor-pointer transition duration-200"
+                    : "bg-amber-600 hover:bg-amber-500 text-white px-4 py-1.5 rounded text-sm font-bold shadow cursor-pointer transition duration-200";
+            });
+
+            document.getElementById('tabRanking').addEventListener('click', () => {
+                document.getElementById('tabRanking').className = "flex-1 py-3 bg-slate-700 text-white transition";
+                document.getElementById('tabLog').className = "flex-1 py-3 text-slate-400 hover:text-white transition bg-slate-900";
+                document.getElementById('rankingList').classList.remove('hidden');
+                document.getElementById('logList').classList.add('hidden');
+            });
+
+            document.getElementById('tabLog').addEventListener('click', () => {
+                document.getElementById('tabLog').className = "flex-1 py-3 bg-slate-700 text-white transition";
+                document.getElementById('tabRanking').className = "flex-1 py-3 text-slate-400 hover:text-white transition bg-slate-900";
+                document.getElementById('logList').classList.remove('hidden');
+                document.getElementById('rankingList').classList.add('hidden');
+            });
+
+            // 最初にいくつか国家を配置
+            for(let i=0; i<6; i++) spawnCiv();
+            
+            requestAnimationFrame(loop);
+        }
+
+        // アプリケーション開始
+        window.onload = init;
+
+    </script>
+</body>
+</html>
