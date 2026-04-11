@@ -13,12 +13,18 @@
         ::-webkit-scrollbar-track { background: #1e293b; }
         ::-webkit-scrollbar-thumb { background: #475569; border-radius: 3px; }
         ::-webkit-scrollbar-thumb:hover { background: #64748b; }
+        .resizable-panel-y {
+            resize: vertical;
+            overflow: auto;
+            min-height: 110px;
+            max-height: 55vh;
+        }
     </style>
 </head>
 <body class="bg-slate-900 text-slate-200 h-screen w-full flex overflow-hidden selection:bg-amber-500 selection:text-white">
 
     <!-- サイドパネル（情報UI） -->
-    <div class="w-80 flex flex-col border-r border-slate-700 bg-slate-800 shadow-xl z-10 flex-shrink-0">
+    <div class="w-80 min-w-[260px] max-w-[55vw] resize-x overflow-auto flex flex-col border-r border-slate-700 bg-slate-800 shadow-xl z-10 flex-shrink-0">
         <!-- ヘッダー -->
         <div class="p-4 border-b border-slate-700 bg-slate-900 flex justify-between items-center">
             <h1 class="text-xl font-bold text-amber-500 tracking-wider">文明の軌跡</h1>
@@ -28,7 +34,7 @@
         </div>
         
         <!-- グローバルステータス -->
-        <div class="p-5 border-b border-slate-700 flex flex-col gap-2 bg-slate-800/50">
+        <div class="p-5 border-b border-slate-700 flex flex-col gap-2 bg-slate-800/50 resizable-panel-y">
             <div class="text-3xl font-mono text-center mb-2 font-bold text-slate-100" id="uiYear">西暦 1 年</div>
             <div class="flex justify-between text-sm items-center">
                 <span class="text-slate-400">世界総人口:</span> 
@@ -41,7 +47,7 @@
         </div>
 
         <!-- 選択セルの詳細情報 -->
-        <div class="p-4 border-b border-slate-700 h-48 bg-slate-900/50" id="uiSelection">
+        <div class="p-4 border-b border-slate-700 h-48 bg-slate-900/50 resizable-panel-y" id="uiSelection">
             <div class="text-slate-500 text-sm text-center mt-12 flex flex-col items-center gap-2">
                 <svg class="w-6 h-6 animate-bounce" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 15l-2 5L9 9l11 4-5 2zm0 0l5 5M7.188 2.239l.777 2.897M5.136 7.965l-2.898-.777M13.95 4.05l-2.122 2.122m-5.657 5.656l-2.12 2.122"></path></svg>
                 マップをクリックすると<br>詳細情報が表示されます
@@ -55,7 +61,7 @@
         </div>
 
         <!-- パネルコンテンツ -->
-        <div class="flex-1 overflow-y-auto p-3 bg-slate-800" id="panelContent">
+        <div class="flex-1 overflow-y-auto p-3 bg-slate-800 resizable-panel-y" id="panelContent">
             <div id="rankingList" class="flex flex-col gap-2"></div>
             <div id="logList" class="hidden flex-col gap-2 text-sm text-slate-300"></div>
         </div>
@@ -310,14 +316,18 @@
 
             const frontier = [[rebelCity.x, rebelCity.y]];
             const seen = new Set([`${rebelCity.x},${rebelCity.y}`]);
-            const targetSize = Math.max(8, Math.floor(Math.sqrt(civ.territory.size) * (1.8 + Math.random())));
+            const unrestFactor = clamp((1 - civ.supportRate), 0.08, 0.95);
+            const targetSize = Math.max(
+                18,
+                Math.floor(civ.territory.size * (0.18 + unrestFactor * 0.45))
+            );
             const toTransfer = [];
             while(frontier.length && toTransfer.length < targetSize) {
                 const idx = Math.floor(Math.random() * frontier.length);
                 const [cx, cy] = frontier.splice(idx,1)[0];
                 if (map[cx][cy].civId === civ.id) toTransfer.push({x:cx,y:cy});
                 for (const [dx,dy] of dirs8) {
-                    if (Math.random() < 0.25) continue;
+                    if (Math.random() < (0.18 - unrestFactor * 0.08)) continue;
                     const nx = cx + dx, ny = cy + dy;
                     if (nx<0||ny<0||nx>=MAP_WIDTH||ny>=MAP_HEIGHT) continue;
                     const k = `${nx},${ny}`;
@@ -533,9 +543,15 @@
                 let x = Math.floor((cx - drawOffsetX) / drawScale);
                 let y = Math.floor((cy - drawOffsetY) / drawScale);
                 if (x<0||y<0||x>=MAP_WIDTH||y>=MAP_HEIGHT) return;
-                selectedCell = {x,y};
                 const key = `${x},${y}`;
-                if (pinnedCells.has(key)) pinnedCells.delete(key); else pinnedCells.add(key);
+                if (pinnedCells.has(key)) {
+                    pinnedCells.clear();
+                    selectedCell = null;
+                } else {
+                    pinnedCells.clear();
+                    pinnedCells.add(key);
+                    selectedCell = {x,y};
+                }
                 updateUISelection();
             });
         }
