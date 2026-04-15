@@ -119,6 +119,7 @@
 
         let monthCount = 0;
         let isPaused = true;
+        let pauseLockReason = null;
         let playerCivId = null;
         let hasFoundedNation = false;
         let pendingRequests = [];
@@ -193,6 +194,21 @@
             const year = 1 + Math.floor(monthCount / 12);
             const month = (monthCount % 12) + 1;
             return { year, month };
+        }
+
+        function setPauseState(nextPaused) {
+            isPaused = !!nextPaused;
+            const btn = document.getElementById('btnToggle');
+            if (!btn) return;
+            if (pauseLockReason === 'playerDefeated') {
+                btn.textContent = '停止中';
+                btn.disabled = true;
+                btn.classList.add('opacity-40', 'cursor-not-allowed');
+                return;
+            }
+            btn.disabled = false;
+            btn.classList.remove('opacity-40', 'cursor-not-allowed');
+            btn.textContent = isPaused ? '再開' : '一時停止';
         }
 
         function generateCivName() {
