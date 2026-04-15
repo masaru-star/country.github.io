@@ -382,6 +382,10 @@
             rebelCiv.supportRate = clamp(0.35 + Math.random() * 0.3, 0.2, 0.85);
             civs.push(rebelCiv);
             logEvent(`🔥 【反乱発生】${civ.name}で内戦！都市「${rebelCity.name}」が${rebelCiv.name}として独立宣言。`);
+            if (civ.id === playerCivId) {
+                declareWar(rebelCiv, civ, true);
+                pendingRequests.push({ id: requestIdCounter++, type:'war', fromId: rebelCiv.id, toId: civ.id, status:'ongoing', source:'revolt' });
+            }
 
             const frontier = [[rebelCity.x, rebelCity.y]];
             const seen = new Set([`${rebelCity.x},${rebelCity.y}`]);
@@ -1061,6 +1065,11 @@
                 if (civ.isAlive && civ.territory.size === 0) {
                     civ.isAlive = false;
                     logEvent(`☠️ 【滅亡】${civ.name}は歴史から姿を消した。`);
+                    if (civ.id === playerCivId && hasFoundedNation) {
+                        pauseLockReason = 'playerDefeated';
+                        setPauseState(true);
+                        logEvent('🛑 自国が滅亡したため時間は停止しました。再開はできません。');
+                    }
                 }
             });
         }
@@ -1079,11 +1088,8 @@
             setupCanvas();
 
             document.getElementById('btnToggle').addEventListener('click', (e) => {
-                isPaused = !isPaused;
-                e.target.textContent = isPaused ? "再開" : "停止";
-                e.target.className = isPaused
-                    ? "bg-emerald-600 hover:bg-emerald-500 text-white px-4 py-1.5 rounded text-sm font-bold shadow cursor-pointer transition duration-200"
-                    : "bg-amber-600 hover:bg-amber-500 text-white px-4 py-1.5 rounded text-sm font-bold shadow cursor-pointer transition duration-200";
+                if (pauseLockReason) return;
+                setPauseState(!isPaused);
             });
 
             document.getElementById('tabRanking').addEventListener('click', () => {
@@ -1138,6 +1144,7 @@
             });
 
             for(let i=0; i<8; i++) spawnCiv();
+            setPauseState(true);
             requestAnimationFrame(loop);
         }
 
