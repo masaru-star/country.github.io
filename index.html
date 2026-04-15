@@ -125,7 +125,6 @@
         let requestIdCounter = 1;
         let activeTab = 'ranking';
         let blinkingDemandTiles = [];
-        let pauseLockReason = null;
 
         let bgCanvas, bgCtx, bgImgData;
         let uiCanvas, uiCtx;
@@ -189,17 +188,6 @@
         function clamp(v,min,max){ return Math.max(min, Math.min(max, v)); }
         function weightedLeaderStat() { return 20 + Math.floor(80 * Math.pow(Math.random(), 2.3)); }
         function getPlayerCiv() { return civs.find(c => c.id === playerCivId && c.isAlive) || null; }
-        function setPauseState(paused) {
-            isPaused = paused;
-            const btn = document.getElementById('btnToggle');
-            if (!btn) return;
-            btn.textContent = isPaused ? "再開" : "停止";
-            btn.className = isPaused
-                ? "bg-emerald-600 hover:bg-emerald-500 text-white px-4 py-1.5 rounded text-sm font-bold shadow cursor-pointer transition duration-200"
-                : "bg-amber-600 hover:bg-amber-500 text-white px-4 py-1.5 rounded text-sm font-bold shadow cursor-pointer transition duration-200";
-            btn.disabled = !!pauseLockReason;
-            if (pauseLockReason) btn.classList.add('opacity-40', 'cursor-not-allowed');
-        }
 
         function getYearMonth() {
             const year = 1 + Math.floor(monthCount / 12);
@@ -791,7 +779,7 @@
                 logHtml += `<div class="border-l-2 ${isMajor ? 'border-amber-500' : 'border-slate-600'} pl-3 py-1.5 ${colorClass}">${log}</div>`;
             });
             document.getElementById('logList').innerHTML = logHtml;
-            if (hasFoundedNation && activeTab === 'log') renderNationOps();
+            if (hasFoundedNation) renderNationOps();
             updateUISelection();
         }
 
@@ -870,12 +858,7 @@
                     }
                     if (demanded.length >= sizeBase + Math.floor(Math.random()*4)) break;
                 }
-                if (demanded.length) {
-                    pendingRequests.push({ id: requestIdCounter++, type:'cession', fromId: from.id, toId: player.id, demandedTiles: demanded, forced: false, status:'pending' });
-                    pauseLockReason = 'cession';
-                    setPauseState(true);
-                    logEvent('⏸️ 領土割譲要求のため時間が停止。対応するまで再開不可。');
-                }
+                if (demanded.length) pendingRequests.push({ id: requestIdCounter++, type:'cession', fromId: from.id, toId: player.id, demandedTiles: demanded, forced: false, status:'pending' });
             }
             if (Math.random() < 0.008) {
                 const from = pick(others);
@@ -990,14 +973,6 @@
                 else applyBigImpact(player, -0.6);
             }
             if (!(req.type === 'war' && decision === 'accept')) req.status = 'resolved';
-            if (req.type === 'cession') {
-                const hasPendingCession = pendingRequests.some(r => r.type === 'cession' && r.status === 'pending');
-                if (!hasPendingCession && pauseLockReason === 'cession') {
-                    pauseLockReason = null;
-                    setPauseState(true);
-                    logEvent('▶️ 領土割譲要求への対応が完了。再開可能になった。');
-                }
-            }
             logEvent(`📜 要請「${req.type}」を${decision === 'accept' ? '受理' : '却下'}。`);
             renderNationOps();
         }
@@ -1013,8 +988,6 @@
                 }
             });
             const unresolved = pendingRequests.filter(r => r.status === 'pending' || r.status === 'ongoing');
-            const sortPriority = { war: 1, cession: 2, alliance: 3, nap: 3, joinwar: 4, demilitarize: 5 };
-            unresolved.sort((a, b) => (sortPriority[a.type] || 99) - (sortPriority[b.type] || 99));
             blinkingDemandTiles = [];
             if (!unresolved.length) {
                 box.innerHTML = '<div class="text-slate-400 text-xs">現在、対応が必要な国家運営イベントはありません。</div>';
@@ -1032,8 +1005,8 @@
                     <div class="font-bold text-amber-300">${labelMap[req.type] || req.type}</div>
                     <div class="text-xs text-slate-300 mt-1">${name}${req.type==='joinwar'?' から参戦要請':''}${req.type==='cession'?'（要求地はマップ上で点滅）':''}</div>
                     <div class="mt-2 flex gap-2">
-                        <button data-request-id="${req.id}" data-decision="accept" class="px-2 py-1 rounded bg-emerald-700 hover:bg-emerald-600 text-xs">${req.type==='war' && req.status==='ongoing'?'進軍継続':req.type==='war'?'応戦':'受理'}</button>
-                        <button data-request-id="${req.id}" data-decision="reject" ${onlyAccept ? 'disabled' : ''} class="px-2 py-1 rounded bg-rose-700 hover:bg-rose-600 disabled:opacity-40 text-xs">${req.type==='war'?'降伏':'却下'}</button>
+                        <button onclick="resolveRequest(${req.id},'accept')" class="px-2 py-1 rounded bg-emerald-700 hover:bg-emerald-600 text-xs">${req.type==='war' && req.status==='ongoing'?'進軍継続':req.type==='war'?'応戦':'受理'}</button>
+                        <button onclick="resolveRequest(${req.id},'reject')" ${onlyAccept ? 'disabled' : ''} class="px-2 py-1 rounded bg-rose-700 hover:bg-rose-600 disabled:opacity-40 text-xs">${req.type==='war'?'降伏':'却下'}</button>
                     </div>
                 </div>`;
             }).join('');
@@ -1135,14 +1108,6 @@
                 document.getElementById(hasFoundedNation ? 'nationOps' : 'logList').classList.remove('hidden');
                 document.getElementById('rankingList').classList.add('hidden');
                 document.getElementById(hasFoundedNation ? 'logList' : 'nationOps').classList.add('hidden');
-            });
-            document.getElementById('nationOps').addEventListener('click', (e) => {
-                const btn = e.target.closest('button[data-request-id]');
-                if (!btn) return;
-                const id = Number(btn.dataset.requestId);
-                const decision = btn.dataset.decision;
-                if (!id || !decision) return;
-                resolveRequest(id, decision);
             });
 
             const foundModal = document.getElementById('foundModal');
