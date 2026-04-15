@@ -26,11 +26,16 @@
     <!-- サイドパネル（情報UI） -->
     <div class="w-80 min-w-[260px] max-w-[55vw] resize-x overflow-auto flex flex-col border-r border-slate-700 bg-slate-800 shadow-xl z-10 flex-shrink-0">
         <!-- ヘッダー -->
-        <div class="p-4 border-b border-slate-700 bg-slate-900 flex justify-between items-center">
+        <div class="p-4 border-b border-slate-700 bg-slate-900 flex justify-between items-center gap-2">
             <h1 class="text-xl font-bold text-amber-500 tracking-wider">文明の軌跡</h1>
-            <button id="btnToggle" class="bg-amber-600 hover:bg-amber-500 text-white px-4 py-1.5 rounded text-sm font-bold shadow cursor-pointer transition duration-200">
-                停止
-            </button>
+            <div class="flex items-center gap-2">
+                <button id="btnFound" class="bg-indigo-600 hover:bg-indigo-500 text-white px-3 py-1.5 rounded text-sm font-bold shadow cursor-pointer transition duration-200">
+                    建国
+                </button>
+                <button id="btnToggle" class="bg-emerald-600 hover:bg-emerald-500 text-white px-4 py-1.5 rounded text-sm font-bold shadow cursor-pointer transition duration-200">
+                    再開
+                </button>
+            </div>
         </div>
         
         <!-- グローバルステータス -->
@@ -64,6 +69,7 @@
         <div class="flex-1 overflow-y-auto p-3 bg-slate-800 resizable-panel-y" id="panelContent">
             <div id="rankingList" class="flex flex-col gap-2"></div>
             <div id="logList" class="hidden flex-col gap-2 text-sm text-slate-300"></div>
+            <div id="nationOps" class="hidden flex-col gap-2 text-sm text-slate-300"></div>
         </div>
     </div>
 
@@ -73,6 +79,29 @@
         <canvas id="bgCanvas" style="display:none;"></canvas>
         <!-- ユーザーに見せるメインキャンバス -->
         <canvas id="uiCanvas" class="absolute inset-0 cursor-crosshair w-full h-full"></canvas>
+    </div>
+
+    <div id="foundModal" class="hidden fixed inset-0 z-20 bg-black/70 items-center justify-center p-4">
+        <div class="w-full max-w-lg rounded-lg border border-slate-600 bg-slate-900 p-5 shadow-2xl">
+            <h2 class="text-lg font-bold text-indigo-300 mb-4">建国</h2>
+            <p class="text-sm text-slate-300 mb-3">首都は現在選択中の座標を使用します（未占領の陸地のみ）。</p>
+            <form id="foundForm" class="space-y-3">
+                <div>
+                    <label class="text-xs text-slate-400">国家名</label>
+                    <input id="foundName" required maxlength="20" class="w-full mt-1 rounded bg-slate-800 border border-slate-600 px-3 py-2 text-sm" placeholder="例: 新アルトリア連邦">
+                </div>
+                <div>
+                    <label class="text-xs text-slate-400">イデオロギー</label>
+                    <select id="foundIdeology" class="w-full mt-1 rounded bg-slate-800 border border-slate-600 px-3 py-2 text-sm">
+                        <option>民主主義</option><option>王政</option><option>神権</option><option>軍国主義</option><option>連邦主義</option>
+                    </select>
+                </div>
+                <div class="flex justify-end gap-2 pt-1">
+                    <button type="button" id="btnCancelFound" class="px-3 py-1.5 rounded bg-slate-700 hover:bg-slate-600 text-sm">キャンセル</button>
+                    <button type="submit" class="px-3 py-1.5 rounded bg-indigo-600 hover:bg-indigo-500 text-sm font-bold">建国する</button>
+                </div>
+            </form>
+        </div>
     </div>
 
     <script>
@@ -89,7 +118,13 @@
         let activeShips = [];
 
         let monthCount = 0;
-        let isPaused = false;
+        let isPaused = true;
+        let playerCivId = null;
+        let hasFoundedNation = false;
+        let pendingRequests = [];
+        let requestIdCounter = 1;
+        let activeTab = 'ranking';
+        let blinkingDemandTiles = [];
 
         let bgCanvas, bgCtx, bgImgData;
         let uiCanvas, uiCtx;
@@ -123,6 +158,22 @@
                 this.tradePartners = new Set();
                 this.navy = 1;
                 this.tradeFleet = 1;
+                this.leader = {
+                    politics: weightedLeaderStat(),
+                    finance: weightedLeaderStat(),
+                    military: weightedLeaderStat(),
+                    diplomacy: weightedLeaderStat()
+                };
+                this.intelError = 7 + Math.floor(Math.random() * 14);
+                this.intelBias = {
+                    population: (Math.random() * 2 - 1) * this.intelError,
+                    support: (Math.random() * 2 - 1) * this.intelError,
+                    treasury: (Math.random() * 2 - 1) * this.intelError,
+                    military: (Math.random() * 2 - 1) * this.intelError
+                };
+                this.wars = new Set();
+                this.canAdvanceWars = true;
+                this.hasSeaAccess = false;
             }
         }
 
@@ -135,6 +186,8 @@
 
         function pick(arr){ return arr[Math.floor(Math.random()*arr.length)]; }
         function clamp(v,min,max){ return Math.max(min, Math.min(max, v)); }
+        function weightedLeaderStat() { return 20 + Math.floor(80 * Math.pow(Math.random(), 2.3)); }
+        function getPlayerCiv() { return civs.find(c => c.id === playerCivId && c.isAlive) || null; }
 
         function getYearMonth() {
             const year = 1 + Math.floor(monthCount / 12);
@@ -302,6 +355,22 @@
             return civ;
         }
 
+        function foundPlayerNation(x, y, name, ideology) {
+            if (map[x][y].type === 0 || map[x][y].civId !== null) return null;
+            const civ = new Civilization(civIdCounter++, generateColor(), name);
+            civ.ideology = ideology;
+            civs.push(civ);
+            claimCell(x, y, civ);
+            const ym = getYearMonth();
+            const city = { id: cityIdCounter++, name: `${name}中央`, x, y, founded: `${ym.year}/${ym.month}` };
+            civ.cities.push(city);
+            map[x][y].cityId = city.id;
+            playerCivId = civ.id;
+            hasFoundedNation = true;
+            logEvent(`🏛️ 【建国】あなたの国家「${name}」が成立。首都「${city.name}」を設置。`);
+            return civ;
+        }
+
         function collapseCiv(civ) {
             if (civ.cities.length <= 1 || civs.filter(c=>c.isAlive).length >= MAX_CIVS) return;
             let rebelCityIndex = Math.floor(Math.random() * civ.cities.length);
@@ -370,6 +439,8 @@
                     let enemy = civs.find(c => c.id === target.civId);
                     if (!enemy) continue;
                     if (civ.nonAggressionPacts.has(enemy.id) || civ.alliances.has(enemy.id)) continue;
+                    if ((civ.id === playerCivId || enemy.id === playerCivId) && !areAtWar(civ, enemy)) continue;
+                    if (civ.id === playerCivId && !civ.canAdvanceWars) continue;
                     let myAtk = civ.military * (0.6 + Math.random() * 0.8);
                     let defDef = enemy.military * (0.6 + Math.random() * 0.8) * 1.3;
                     if (target.type === 2) defDef *= 1.6;
@@ -666,6 +737,16 @@
                 uiCtx.closePath();
                 uiCtx.fill();
             });
+
+            if (blinkingDemandTiles.length) {
+                const blinkAlpha = 0.18 + ((Math.sin(frameCounter * 0.18) + 1) / 2) * 0.45;
+                blinkingDemandTiles.forEach(tile => {
+                    const cx = drawOffsetX + tile.x * drawScale;
+                    const cy = drawOffsetY + tile.y * drawScale;
+                    uiCtx.fillStyle = `rgba(${tile.color.r},${tile.color.g},${tile.color.b},${blinkAlpha.toFixed(2)})`;
+                    uiCtx.fillRect(cx, cy, drawScale, drawScale);
+                });
+            }
         }
 
         function updateUI() {
@@ -694,11 +775,98 @@
                 logHtml += `<div class="border-l-2 ${isMajor ? 'border-amber-500' : 'border-slate-600'} pl-3 py-1.5 ${colorClass}">${log}</div>`;
             });
             document.getElementById('logList').innerHTML = logHtml;
+            if (hasFoundedNation) renderNationOps();
             updateUISelection();
         }
 
         function relationNames(civ, ids) {
             return Array.from(ids).slice(0,4).map(id => civs.find(c=>c.id===id)?.name).filter(Boolean).join('、') || 'なし';
+        }
+
+        function civCoastalAccess(civ) {
+            return coastalTilesOf(civ).length > 0;
+        }
+
+        function areAdjacentOrSeaLinked(a, b) {
+            for (const key of a.territory) {
+                const [x,y] = key.split(',').map(Number);
+                for (const [dx,dy] of dirs4) {
+                    const nx=x+dx, ny=y+dy;
+                    if (nx<0||ny<0||nx>=MAP_WIDTH||ny>=MAP_HEIGHT) continue;
+                    if (map[nx][ny].civId === b.id) return true;
+                }
+            }
+            return civCoastalAccess(a) && civCoastalAccess(b);
+        }
+
+        function areAtWar(a, b) {
+            return a?.wars?.has(b.id) || b?.wars?.has(a.id);
+        }
+
+        function declareWar(fromCiv, toCiv, viaRequest=false) {
+            if (!fromCiv || !toCiv || fromCiv.id === toCiv.id) return;
+            fromCiv.wars.add(toCiv.id);
+            toCiv.wars.add(fromCiv.id);
+            logEvent(`⚔️ ${fromCiv.name}が${toCiv.name}へ宣戦布告。`);
+            if (!viaRequest && toCiv.id === playerCivId) {
+                pendingRequests.push({ id: requestIdCounter++, type:'war', fromId: fromCiv.id, toId: toCiv.id, status:'pending' });
+            }
+        }
+
+        function endWar(a, b) {
+            if (!a || !b) return;
+            a.wars.delete(b.id);
+            b.wars.delete(a.id);
+            logEvent(`🕊️ ${a.name}と${b.name}の戦争が終結。`);
+        }
+
+        function applyBigImpact(civ, sign = 1) {
+            if (!civ) return;
+            civ.supportRate = clamp(civ.supportRate + sign * (0.06 + civ.leader.politics / 2200), 0.05, 0.97);
+            civ.treasury += sign * (30 + civ.leader.finance * 0.8);
+            civ.resourceStock += sign * (25 + civ.leader.finance * 0.5);
+            civ.military = Math.max(5, civ.military + sign * (12 + civ.leader.military * 0.4));
+        }
+
+        function generatePlayerRequests() {
+            const player = getPlayerCiv();
+            if (!player) return;
+            const others = civs.filter(c => c.isAlive && c.id !== player.id);
+            if (!others.length) return;
+            if (Math.random() < 0.012) {
+                const from = pick(others);
+                pendingRequests.push({ id: requestIdCounter++, type: Math.random() < 0.5 ? 'alliance' : 'nap', fromId: from.id, toId: player.id, status:'pending' });
+            }
+            if (Math.random() < 0.01) {
+                const enemy = pick(others);
+                declareWar(enemy, player, true);
+            }
+            if (Math.random() < 0.009) {
+                const from = pick(others);
+                const sizeBase = Math.max(1, Math.floor((1 - from.supportRate) * 8));
+                const demanded = [];
+                for (const key of player.territory) {
+                    const [x,y] = key.split(',').map(Number);
+                    for (const [dx,dy] of dirs4) {
+                        const nx=x+dx, ny=y+dy;
+                        if (nx<0||ny<0||nx>=MAP_WIDTH||ny>=MAP_HEIGHT) continue;
+                        if (map[nx][ny].civId === from.id) { demanded.push({x,y}); break; }
+                    }
+                    if (demanded.length >= sizeBase + Math.floor(Math.random()*4)) break;
+                }
+                if (demanded.length) pendingRequests.push({ id: requestIdCounter++, type:'cession', fromId: from.id, toId: player.id, demandedTiles: demanded, forced: false, status:'pending' });
+            }
+            if (Math.random() < 0.008) {
+                const from = pick(others);
+                pendingRequests.push({ id: requestIdCounter++, type:'demilitarize', fromId: from.id, toId: player.id, signers:[from.id], status:'pending' });
+            }
+            if (Math.random() < 0.007) {
+                const ally = others.find(c => player.alliances.has(c.id));
+                if (ally) {
+                    const target = others.find(c => c.id !== ally.id && areAdjacentOrSeaLinked(player, c));
+                    if (target) pendingRequests.push({ id: requestIdCounter++, type:'joinwar', fromId: ally.id, targetId: target.id, toId: player.id, status:'pending' });
+                }
+            }
         }
 
         function updateUISelection() {
@@ -715,21 +883,129 @@
             if (cell.civId !== null) {
                 let civ = civs.find(c => c.id === cell.civId);
                 if (civ) {
+                    const isPlayer = civ.id === playerCivId;
+                    const estPop = Math.floor(civ.population * (1 + civ.intelBias.population / 100));
+                    const estSupport = clamp(civ.supportRate * 100 + civ.intelBias.support, 1, 99);
+                    const estMilitary = Math.max(1, Math.floor(civ.military * (1 + civ.intelBias.military / 100)));
+                    const estTreasury = Math.floor(civ.treasury * (1 + civ.intelBias.treasury / 100));
                     content += `<div class="flex items-center gap-2 mb-2"><div class="w-3.5 h-3.5 rounded-full" style="background-color: rgb(${civ.color.r},${civ.color.g},${civ.color.b})"></div>
                     <div class="font-bold text-base" style="color: rgb(${civ.color.r},${civ.color.g},${civ.color.b})">${civ.name}</div></div>
                     <div class="grid grid-cols-2 gap-1 text-xs bg-slate-800/80 p-2 rounded">
-                        <div>人口: ${Math.floor(civ.population).toLocaleString()}</div><div>領土: ${civ.territory.size}</div>
-                        <div>技術力: ${civ.tech.toFixed(2)}</div><div>軍事力: ${Math.floor(civ.military)}</div>
-                        <div>イデオロギー: ${civ.ideology}</div><div>支持率: ${(civ.supportRate*100).toFixed(1)}%</div>
-                        <div>資源貯蓄: ${Math.floor(civ.resourceStock)}</div><div>財政: ${civ.fiscal>=0?'黒字':'赤字'} (${civ.fiscal.toFixed(1)})</div>
+                        <div>人口(推定): ${Math.max(1, estPop).toLocaleString()}</div><div>領土: ${civ.territory.size}</div>
+                        <div>技術力: ${civ.tech.toFixed(2)}</div><div>軍事力(推定): ${estMilitary}</div>
+                        <div>イデオロギー: ${civ.ideology}</div><div>支持率(推定): ${estSupport.toFixed(1)}%</div>
+                        <div>資源貯蓄: ${Math.floor(civ.resourceStock)}</div><div>国庫(推定): ${estTreasury}</div>
+                        <div class="col-span-2 text-indigo-300">指導者: 政治${civ.leader.politics}/財政${civ.leader.finance}/軍事${civ.leader.military}/外交${civ.leader.diplomacy}（誤差±${civ.intelError}）</div>
                         <div>同盟: ${relationNames(civ,civ.alliances)}</div><div>不可侵: ${relationNames(civ,civ.nonAggressionPacts)}</div>
                         <div class="col-span-2">通商禁止: ${relationNames(civ,civ.embargoes)}</div>
                     </div>`;
+                    const player = getPlayerCiv();
+                    if (player && !isPlayer) {
+                        const canWar = areAdjacentOrSeaLinked(player, civ);
+                        content += `<div class="grid grid-cols-2 gap-2 mt-2 text-xs">
+                            <button onclick="issueDiplomacy(${civ.id},'alliance')" class="bg-emerald-700 hover:bg-emerald-600 px-2 py-1 rounded">同盟提案</button>
+                            <button onclick="issueDiplomacy(${civ.id},'nap')" class="bg-sky-700 hover:bg-sky-600 px-2 py-1 rounded">不可侵提案</button>
+                            <button onclick="issueDiplomacy(${civ.id},'embargo')" class="bg-orange-700 hover:bg-orange-600 px-2 py-1 rounded">通商禁止</button>
+                            <button onclick="issueDiplomacy(${civ.id},'war')" ${canWar ? '' : 'disabled'} class="bg-rose-700 hover:bg-rose-600 disabled:opacity-40 px-2 py-1 rounded">${areAtWar(player,civ)?'進軍停止':'宣戦布告'}</button>
+                        </div>`;
+                    }
                 }
             } else {
                 content += `<div class="text-slate-500 text-sm italic mt-3">未開の地</div>`;
             }
             selectionDiv.innerHTML = content;
+        }
+
+        function issueDiplomacy(targetId, action) {
+            const player = getPlayerCiv();
+            const target = civs.find(c => c.id === targetId && c.isAlive);
+            if (!player || !target) return;
+            if (action === 'alliance') {
+                player.alliances.add(target.id); target.alliances.add(player.id);
+                logEvent(`🤝 ${player.name}が${target.name}と同盟。`);
+            } else if (action === 'nap') {
+                player.nonAggressionPacts.add(target.id); target.nonAggressionPacts.add(player.id);
+                logEvent(`🕊️ ${player.name}が${target.name}と不可侵条約。`);
+            } else if (action === 'embargo') {
+                player.embargoes.add(target.id); target.embargoes.add(player.id);
+                logEvent(`🚫 ${player.name}が${target.name}へ通商禁止。`);
+            } else if (action === 'war') {
+                if (areAtWar(player, target)) {
+                    player.canAdvanceWars = !player.canAdvanceWars;
+                    logEvent(`🪖 ${player.name}が${player.canAdvanceWars ? '進軍再開' : '進軍停止'}を指示。`);
+                } else if (areAdjacentOrSeaLinked(player, target)) {
+                    declareWar(player, target);
+                }
+            }
+            updateUISelection();
+        }
+        window.issueDiplomacy = issueDiplomacy;
+
+        function resolveRequest(id, decision) {
+            const req = pendingRequests.find(r => r.id === id);
+            const player = getPlayerCiv();
+            if (!req || !player) return;
+            const from = civs.find(c => c.id === req.fromId);
+            if (req.type === 'alliance') {
+                if (decision === 'accept') { player.alliances.add(from.id); from?.alliances.add(player.id); applyBigImpact(player, 1); }
+                else applyBigImpact(player, -1);
+            } else if (req.type === 'nap') {
+                if (decision === 'accept') { player.nonAggressionPacts.add(from.id); from?.nonAggressionPacts.add(player.id); applyBigImpact(player, 1); }
+                else applyBigImpact(player, -1);
+            } else if (req.type === 'war') {
+                if (decision === 'accept') { declareWar(player, from, true); player.canAdvanceWars = true; req.status = 'ongoing'; }
+                else { applyBigImpact(player, -1); endWar(player, from); req.forcedCession = true; }
+            } else if (req.type === 'cession') {
+                if (decision === 'accept' || req.forced) {
+                    req.demandedTiles?.forEach(t => { if (map[t.x][t.y].civId === player.id && from) transferCell(t.x, t.y, player, from); });
+                    applyBigImpact(player, -1);
+                } else applyBigImpact(player, 1);
+            } else if (req.type === 'demilitarize') {
+                if (decision === 'accept') { player.military *= 0.82; applyBigImpact(player, 1); }
+                else applyBigImpact(player, -1);
+            } else if (req.type === 'joinwar') {
+                const target = civs.find(c => c.id === req.targetId);
+                if (decision === 'accept' && target) { declareWar(player, target, true); applyBigImpact(player, -1); }
+                else applyBigImpact(player, -0.6);
+            }
+            if (!(req.type === 'war' && decision === 'accept')) req.status = 'resolved';
+            logEvent(`📜 要請「${req.type}」を${decision === 'accept' ? '受理' : '却下'}。`);
+            renderNationOps();
+        }
+        window.resolveRequest = resolveRequest;
+
+        function renderNationOps() {
+            const box = document.getElementById('nationOps');
+            pendingRequests.forEach(r => {
+                if (r.type === 'war' && r.status === 'ongoing') {
+                    const player = getPlayerCiv();
+                    const from = civs.find(c => c.id === r.fromId);
+                    if (!player || !from || !areAtWar(player, from)) r.status = 'resolved';
+                }
+            });
+            const unresolved = pendingRequests.filter(r => r.status === 'pending' || r.status === 'ongoing');
+            blinkingDemandTiles = [];
+            if (!unresolved.length) {
+                box.innerHTML = '<div class="text-slate-400 text-xs">現在、対応が必要な国家運営イベントはありません。</div>';
+                return;
+            }
+            box.innerHTML = unresolved.map(req => {
+                const from = civs.find(c => c.id === req.fromId);
+                const name = from?.name || '不明国家';
+                if (req.type === 'cession' && req.demandedTiles && from) {
+                    req.demandedTiles.forEach(t => blinkingDemandTiles.push({ ...t, color: from.color }));
+                }
+                const onlyAccept = req.type === 'cession' && req.forced;
+                const labelMap = { alliance:'同盟要請', nap:'不可侵要請', war:'宣戦布告', cession:'領土割譲要求', demilitarize:'軍縮条約', joinwar:'参戦要請' };
+                return `<div class="p-2 rounded border border-slate-600 bg-slate-900/80">
+                    <div class="font-bold text-amber-300">${labelMap[req.type] || req.type}</div>
+                    <div class="text-xs text-slate-300 mt-1">${name}${req.type==='joinwar'?' から参戦要請':''}${req.type==='cession'?'（要求地はマップ上で点滅）':''}</div>
+                    <div class="mt-2 flex gap-2">
+                        <button onclick="resolveRequest(${req.id},'accept')" class="px-2 py-1 rounded bg-emerald-700 hover:bg-emerald-600 text-xs">${req.type==='war' && req.status==='ongoing'?'進軍継続':req.type==='war'?'応戦':'受理'}</button>
+                        <button onclick="resolveRequest(${req.id},'reject')" ${onlyAccept ? 'disabled' : ''} class="px-2 py-1 rounded bg-rose-700 hover:bg-rose-600 disabled:opacity-40 text-xs">${req.type==='war'?'降伏':'却下'}</button>
+                    </div>
+                </div>`;
+            }).join('');
         }
 
         function updateSim() {
@@ -759,6 +1035,10 @@
                 civ.treasury += civ.fiscal;
                 civ.resourceStock += resourceYield * 0.25 + Math.max(0, civ.fiscal * 0.3);
                 civ.supportRate = clamp(civ.supportRate + (civ.fiscal >= 0 ? 0.002 : -0.003) + (Math.random()-0.5)*0.01, 0.05, 0.95);
+                civ.supportRate = clamp(civ.supportRate + (civ.leader.politics - 55) * 0.00005, 0.05, 0.97);
+                civ.resourceStock += (civ.leader.finance - 55) * 0.03;
+                civ.navy = Math.max(1, civ.navy + (civ.leader.military - 55) * 0.0006);
+                civ.hasSeaAccess = civCoastalAccess(civ);
 
                 let expansionRate = Math.sqrt(civ.population) / 55;
                 let empirePenalty = Math.max(0.04, 1 - (civ.territory.size / (MAP_WIDTH*MAP_HEIGHT*0.12)));
@@ -775,6 +1055,7 @@
 
             updateDiplomacyAndTrade(civs.filter(c=>c.isAlive));
             updateShips();
+            if (hasFoundedNation) generatePlayerRequests();
 
             civs.forEach(civ => {
                 if (civ.isAlive && civ.territory.size === 0) {
@@ -806,17 +1087,54 @@
             });
 
             document.getElementById('tabRanking').addEventListener('click', () => {
+                activeTab = 'ranking';
                 document.getElementById('tabRanking').className = "flex-1 py-3 bg-slate-700 text-white transition";
                 document.getElementById('tabLog').className = "flex-1 py-3 text-slate-400 hover:text-white transition bg-slate-900";
                 document.getElementById('rankingList').classList.remove('hidden');
                 document.getElementById('logList').classList.add('hidden');
+                document.getElementById('nationOps').classList.add('hidden');
             });
 
             document.getElementById('tabLog').addEventListener('click', () => {
+                activeTab = 'log';
                 document.getElementById('tabLog').className = "flex-1 py-3 bg-slate-700 text-white transition";
                 document.getElementById('tabRanking').className = "flex-1 py-3 text-slate-400 hover:text-white transition bg-slate-900";
-                document.getElementById('logList').classList.remove('hidden');
+                document.getElementById(hasFoundedNation ? 'nationOps' : 'logList').classList.remove('hidden');
                 document.getElementById('rankingList').classList.add('hidden');
+                document.getElementById(hasFoundedNation ? 'logList' : 'nationOps').classList.add('hidden');
+            });
+
+            const foundModal = document.getElementById('foundModal');
+            document.getElementById('btnFound').addEventListener('click', () => {
+                if (hasFoundedNation) return;
+                if (!selectedCell) { alert('首都にする未占領の陸地セルを選択してください。'); return; }
+                const c = map[selectedCell.x][selectedCell.y];
+                if (c.type === 0 || c.civId !== null) { alert('既に国がある場所、または海には建国できません。'); return; }
+                foundModal.classList.remove('hidden');
+                foundModal.classList.add('flex');
+            });
+            document.getElementById('btnCancelFound').addEventListener('click', () => {
+                foundModal.classList.add('hidden');
+                foundModal.classList.remove('flex');
+            });
+            document.getElementById('foundForm').addEventListener('submit', (e) => {
+                e.preventDefault();
+                if (hasFoundedNation || !selectedCell) return;
+                const name = document.getElementById('foundName').value.trim();
+                const ideology = document.getElementById('foundIdeology').value;
+                if (!name) return;
+                const civ = foundPlayerNation(selectedCell.x, selectedCell.y, name, ideology);
+                if (!civ) { alert('この地点には建国できません。'); return; }
+                document.getElementById('btnFound').disabled = true;
+                document.getElementById('btnFound').classList.add('opacity-40', 'cursor-not-allowed');
+                document.getElementById('tabLog').textContent = '国家運営';
+                foundModal.classList.add('hidden');
+                foundModal.classList.remove('flex');
+                renderNationOps();
+                if (activeTab === 'log') {
+                    document.getElementById('logList').classList.add('hidden');
+                    document.getElementById('nationOps').classList.remove('hidden');
+                }
             });
 
             for(let i=0; i<8; i++) spawnCiv();
